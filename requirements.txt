@@ -1,3 +1,10 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+pandas
+joblib
+httpx
+
 # Web Framework
 flask==3.0.0
 flask-cors==4.0.0
