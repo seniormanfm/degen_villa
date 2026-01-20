@@ -1,26 +1,26 @@
-fastapi
-uvicorn[standard]
-python-dotenv
-pandas
-joblib
-httpx
-
 # Web Framework
+fastapi==0.111.0
+uvicorn[standard]==0.23.2
 flask==3.0.0
 flask-cors==4.0.0
 
 # API Requests
 requests==2.31.0
+httpx==0.24.1
 aiohttp==3.9.1
 
 # Environment Variables
 python-dotenv==1.0.0
-python-dotenv
 
 # Blockchain Interaction
 web3==6.11.3
 eth-utils==2.3.1
 eth-abi==4.2.1
+eth-account==0.10.0
+alchemy-sdk==1.0.0
+moralis==0.1.37
+uniswap-python==0.7.2
+ccxt==4.1.92
 
 # Data Processing
 pandas==2.1.4
@@ -28,8 +28,6 @@ numpy==1.26.2
 
 # Database (Optional)
 sqlalchemy==2.0.23
-
-# Caching
 redis==5.0.1
 
 # API Rate Limiting
@@ -57,16 +55,3 @@ loguru==0.7.2
 # Date/Time Handling
 python-dateutil==2.8.2
 pytz==2023.3
-
-# Blockchain APIs & Data Providers
-moralis==0.1.37
-alchemy-sdk==1.0.0
-
-# DeFi Analytics
-uniswap-python==0.7.2
-
-# Price Feeds
-ccxt==4.1.92
-
-# Wallet Analysis
-eth-account==0.10.0
