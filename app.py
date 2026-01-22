@@ -310,17 +310,51 @@ def _get_liquidity_usd(item) -> float:
 from datetime import datetime
 
 def normalize_new_token(item: dict) -> dict:
+    def _extract_created_iso(obj: dict) -> str | None:
+        # Try common keys and return an ISO-like timestamp string (no fractional seconds)
+        keys = ("liquidityAddedAt", "liquidity_added_at", "created_at", "createdAt")
+        for k in keys:
+            v = obj.get(k)
+            if not v:
+                continue
+            # numeric timestamps
+            if isinstance(v, (int, float)):
+                try:
+                    return datetime.utcfromtimestamp(int(v)).strftime("%Y-%m-%dT%H:%M:%S")
+                except Exception:
+                    continue
+            if isinstance(v, str):
+                s = v.strip()
+                # digits-only timestamp string
+                if s.isdigit():
+                    try:
+                        return datetime.utcfromtimestamp(int(s)).strftime("%Y-%m-%dT%H:%M:%S")
+                    except Exception:
+                        pass
+                # ISO-like string: try fromisoformat (handles offsets when replaced Z)
+                try:
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    return dt.replace(tzinfo=None).isoformat(timespec="seconds")
+                except Exception:
+                    # fallback: if it contains 'T', strip fractional seconds/timezone
+                    if "T" in s:
+                        s2 = s.split(".")[0]
+                        # remove timezone offset if present
+                        if "+" in s2:
+                            s2 = s2.split("+")[0]
+                        elif "-" in s2[11:]:
+                            # handle offsets like 2024-09-18T17:57:14-05:00
+                            s2 = s2[:19]
+                        return s2
+        return None
+
     return {
         "address": item.get("address") or item.get("mint"),
         "symbol": item.get("symbol"),
         "name": item.get("name"),
         "decimals": item.get("decimals"),
         "source": item.get("source") or item.get("platform"),
-        "liquidityAddedAt": (
-            datetime.utcfromtimestamp(item["created_at"]).isoformat()
-            if item.get("created_at")
-            else None
-        ),
+        "liquidityAddedAt": _extract_created_iso(item),
         "logoURI": item.get("logoURI") or item.get("logo"),
         "liquidity": round(_get_liquidity_usd(item), 2),
     }
