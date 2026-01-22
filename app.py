@@ -182,45 +182,179 @@ def cache(expire: int = 300):
 
 
 # Helper: Fetch new token listings (Birdeye) with retry/backoff
-async def fetch_new_tokens(limit=20, offset=0, retries=3):
+async def fetch_new_tokens_with_min_liquidity(
+    target_count: int = 20,
+    min_liquidity_usd: float = 30000,
+    max_pages: int = 10,
+):
+    collected = []
+    offset = 0
+    limit = 20  # Birdeye enforces limit in range 1-20
+
     url = f"{BIRDEYE_BASE}/defi/v2/tokens/new_listing"
-    headers = {"accept": "application/json", "x-chain": "solana", "x-api-key": BIRDEYE_API_KEY}
-    params = {
-        "limit": limit,
-        "offset": offset,
-        "meme_platform_enabled": 0,
-        "sort_by": "created_at",
-        "sort_order": "desc",
-        "created_at_from": int(time.time()) - 86400,  # last 24h
+    headers = {
+        "accept": "application/json",
+        "x-chain": "solana",
+        "x-api-key": BIRDEYE_API_KEY,
     }
 
-    for attempt in range(1, retries + 1):
+    for _ in range(max_pages):
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "meme_platform_enabled": 0,
+            "sort_by": "created_at",
+            "sort_order": "desc",
+            "created_at_from": int(time.time()) - 86400,  # last 24h
+        }
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(url, headers=headers, params=params)
-            if response.status_code == 429:  # Too Many Requests
-                retry_after = int(response.headers.get("Retry-After", 2))
-                await asyncio.sleep(retry_after * attempt)  # exponential backoff
-                continue
-            response.raise_for_status()
-            return response.json().get("data", {}).get("items", [])
+            try:
+                response = await client.get(url, headers=headers, params=params)
+                if response.status_code == 429:
+                    await asyncio.sleep(2)
+                    continue
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                resp = getattr(e, "response", None)
+                status = resp.status_code if resp is not None else "unknown"
+                try:
+                    text = resp.text if resp is not None else str(e)
+                except Exception:
+                    text = str(e)
+                logging.error("Birdeye new_listing HTTP error %s: %s", status, text)
+                detail = f"Birdeye API error {status}: {text[:400]}"
+                raise HTTPException(status_code=502, detail=detail)
+            except httpx.RequestError as e:
+                logging.error("Birdeye request failed: %s", str(e))
+                raise HTTPException(status_code=502, detail=f"Birdeye request failed: {e}")
 
-    raise HTTPException(status_code=429, detail="Rate limit exceeded, please try again later.")
+            try:
+                items = response.json().get("data", {}).get("items", [])
+            except Exception as e:
+                logging.error("Failed to parse Birdeye response JSON: %s", str(e))
+                raise HTTPException(status_code=502, detail=f"Invalid JSON from Birdeye: {e}")
+            if not items:
+                break
+
+            for item in items:
+                liquidity = _get_liquidity_usd(item)
+                if liquidity >= min_liquidity_usd:
+                    collected.append(item)
+                    if len(collected) >= target_count:
+                        return collected
+
+            offset += limit
+
+    return collected
+
+
+
+def _get_liquidity_usd(item) -> float:
+    """Attempt to extract USD liquidity from a token listing item.
+
+    Tries several common keys and simple string parsing (e.g. "$30,000" or "30k").
+    Returns 0.0 if no usable liquidity value is found.
+    """
+    import re
+
+    candidates = [
+        "liquidity_usd",
+        "liquidityUSD",
+        "liquidity",
+        "market_liquidity_usd",
+        "liquidity_usd_24h",
+        "liquidityUsd",
+    ]
+
+    for k in candidates:
+        v = item.get(k)
+        if v is None:
+            continue
+        if isinstance(v, (int, float)):
+            try:
+                return float(v)
+            except Exception:
+                continue
+        if isinstance(v, str):
+            s = v.replace("$", "").replace(",", "").strip().lower()
+            m = re.match(r"^([\d\.]+)k$", s)
+            if m:
+                try:
+                    return float(m.group(1)) * 1000
+                except Exception:
+                    continue
+            try:
+                return float(s)
+            except Exception:
+                continue
+
+    # Try some nested places that some APIs use
+    for path in ("stats", "data", "attributes"):
+        nested = item.get(path) or {}
+        if isinstance(nested, dict):
+            for k in ("liquidity_usd", "liquidity"):
+                v = nested.get(k)
+                if isinstance(v, (int, float)):
+                    try:
+                        return float(v)
+                    except Exception:
+                        continue
+                if isinstance(v, str):
+                    try:
+                        return float(v.replace("$", "").replace(",", ""))
+                    except Exception:
+                        continue
+
+    return 0.0
+
+from datetime import datetime
+
+def normalize_new_token(item: dict) -> dict:
+    return {
+        "address": item.get("address") or item.get("mint"),
+        "symbol": item.get("symbol"),
+        "name": item.get("name"),
+        "decimals": item.get("decimals"),
+        "source": item.get("source") or item.get("platform"),
+        "liquidityAddedAt": (
+            datetime.utcfromtimestamp(item["created_at"]).isoformat()
+            if item.get("created_at")
+            else None
+        ),
+        "logoURI": item.get("logoURI") or item.get("logo"),
+        "liquidity": round(_get_liquidity_usd(item), 2),
+    }
+
 
 
 @app.get("/new-token-listings")
-@cache(expire=300)  # cache for 5 minutes
-async def new_token_listings(limit: int = 20, offset: int = 0):
-    tokens = await fetch_new_tokens(limit=limit, offset=offset)
-    if not tokens:
-        raise HTTPException(status_code=404, detail="No new token listings found")
+@cache(expire=300)
+async def new_token_listings(
+    min_liquidity_usd: float = 30000,
+    target: int = Query(20, ge=1, le=50),
+):
+    raw_tokens = await fetch_new_tokens_with_min_liquidity(
+        target_count=target,
+        min_liquidity_usd=min_liquidity_usd,
+    )
 
-    # Save to joblib database
-    df = pd.DataFrame(tokens)
+    if not raw_tokens:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No new token listings found with liquidity >= {min_liquidity_usd}",
+        )
+
+    normalized_tokens = [normalize_new_token(t) for t in raw_tokens]
+
+    # Save clean version (optional but recommended)
+    df = pd.DataFrame(normalized_tokens)
     save_path = DB_FOLDER / "birdeye_new_listings.joblib"
-    if not df.empty:
-        dump(df, str(save_path))
+    dump(df, save_path)
 
-    return {"totalFetched": len(tokens), "tokens": tokens, "savedTo": str(save_path)}
+    return {
+        "totalFetched": len(normalized_tokens),
+        "tokens": normalized_tokens,
+    }
 
 
 
