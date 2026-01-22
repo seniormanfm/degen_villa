@@ -69,6 +69,7 @@ async def root():
     return {
         "message": "Welcome to DegenVilla Solana API!",
         "endpoints": [
+            "/new-token-listings",
             "/top-holders",
             "/earliest-buyer",
             "/daily-flow",
@@ -133,6 +134,66 @@ def sanitize_token_mint(token_mint: str) -> str:
 # ENDPOINTS
 # ========================
 
+@app.get("/new-token-listings")
+async def get_new_token_listings(
+    hours: int = Query(24, description="Lookback window in hours"),
+    limit: int = Query(100, le=200, description="Max tokens to fetch"),
+):
+    try:
+        save_file = DB_FOLDER / "birdeye_new_listings.pkl"
+
+        url = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
+
+        headers = {
+            "accept": "application/json",
+            "x-chain": "solana",
+            "x-api-key": BIRDEYE_API_KEY,
+        }
+
+        now = int(time.time())
+        created_at_from = now - (hours * 3600)
+
+        batch_size = 20
+        all_tokens = []
+
+        for offset in range(0, limit, batch_size):
+            params = {
+                "limit": batch_size,
+                "offset": offset,
+                "meme_platform_enabled": 0,
+                "sort_by": "created_at",
+                "sort_order": "desc",
+                "created_at_from": created_at_from,
+            }
+
+            data = await async_get_json(url, headers=headers, params=params)
+            items = data.get("data", {}).get("items", [])
+
+            if not items:
+                break
+
+            all_tokens.extend(items)
+
+        if not all_tokens:
+            raise HTTPException(status_code=404, detail="No new token listings found")
+
+        df = pd.DataFrame(all_tokens)
+
+        dump(df, save_file)
+
+        return {
+            "count": len(df),
+            "hours": hours,
+            "new_tokens": df.to_dict(orient="records"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
 @app.get("/top-holders")
 async def get_top_holders(token_mint: str = Query(..., description="Solana token mint address")):
     try:
@@ -151,6 +212,8 @@ async def get_top_holders(token_mint: str = Query(..., description="Solana token
         return {"top_holders": df.head(LIMIT).to_dict(orient="records")}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.get("/earliest-buyer")
 async def get_first_20_buyers(token_mint: str = Query(..., description="Solana token mint address")):
@@ -241,22 +304,64 @@ async def get_daily_flow(token_mint: str = Query(...)):
     
 # add this before the wallet-profit endpoint
 @app.get("/wallet-portfolio")
-async def wallet_portfolio(wallet_address: str = Query(..., description="Solana wallet address")):
+async def wallet_portfolio(
+    wallet_address: str = Query(..., description="Solana wallet address")
+):
     wallet_address = wallet_address.strip()
     if not wallet_address:
         raise HTTPException(status_code=400, detail="Invalid or empty wallet_address")
 
     url = f"https://solana-gateway.moralis.io/account/mainnet/{wallet_address}/portfolio"
-    headers = {"Accept": "application/json", "X-API-Key": MORALIS_API_KEY}
-    params = {"nftMetadata": "false", "mediaItems": "false", "excludeSpam": "true"}
+    headers = {
+        "Accept": "application/json",
+        "X-API-Key": MORALIS_API_KEY
+    }
+    params = {
+        "nftMetadata": "false",
+        "mediaItems": "false",
+        "excludeSpam": "true"
+    }
 
     try:
         data = await async_get_json(url, headers=headers, params=params)
-        return {"wallet": wallet_address, "portfolio": data}
+
+        tokens = data.get("tokens", [])
+        enriched_tokens = []
+
+        for token in tokens:
+            balance = float(token.get("balance", 0))
+            decimals = int(token.get("decimals", 0))
+            price_usd = float(token.get("priceUsd", 0) or 0)
+
+            normalized_balance = balance / (10 ** decimals) if decimals else balance
+            token_value_usd = normalized_balance * price_usd
+
+            enriched_tokens.append({
+                "mint": token.get("mint"),
+                "symbol": token.get("symbol"),
+                "name": token.get("name"),
+                "balance": normalized_balance,
+                "decimals": decimals,
+                "priceUsd": price_usd,
+                "tokenValueUsd": round(token_value_usd, 6)
+            })
+
+        total_wallet_value_usd = round(
+            sum(t["tokenValueUsd"] for t in enriched_tokens),
+            6
+        )
+
+        return {
+            "wallet": wallet_address,
+            "totalValueUsd": total_wallet_value_usd,
+            "tokens": enriched_tokens
+        }
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/wallet-profit")
 async def wallet_profit(token_mint: str = Query(...)):
