@@ -10,6 +10,8 @@ import time
 from datetime import datetime
 import httpx
 from pathlib import Path
+import logging
+import traceback
 
 # ========================
 # LOAD ENV
@@ -27,6 +29,14 @@ CHAIN = "mainnet"
 LIMIT = 25
 DB_FOLDER = Path(r"C:\Users\daddy brian\Desktop\projects\degenvilla\database")
 DB_FOLDER.mkdir(parents=True, exist_ok=True)
+
+# setup simple file logging for diagnostics
+LOG_FILE = DB_FOLDER / "app.log"
+logging.basicConfig(
+    filename=str(LOG_FILE),
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 
 
 app = FastAPI(title="DegenVilla Solana API", version="1.0")
@@ -59,10 +69,45 @@ class TokenRequest(BaseModel):
 # UTILS
 # ========================
 async def async_get_json(url, headers=None, params=None):
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(url, headers=headers, params=params)
-        r.raise_for_status()
-        return r.json()
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=headers, params=params)
+            r.raise_for_status()
+            return r.json()
+    except httpx.HTTPStatusError as e:
+        logging.error("HTTP error fetching %s: %s", url, str(e))
+        logging.error(traceback.format_exc())
+        raise HTTPException(status_code=502, detail=f"Upstream HTTP error: {e}")
+    except Exception as e:
+        logging.error("Error fetching %s: %s", url, str(e))
+        logging.error(traceback.format_exc())
+        raise HTTPException(status_code=502, detail=f"Upstream request failed: {e}")
+
+
+def sanitize_token_mint(token_mint: str) -> str:
+    """Basic sanitization and validation for Solana token mint strings.
+
+    Accepts raw mint strings or query fragments (e.g. "token_mint=..."),
+    strips whitespace and basic validation (base58 chars, reasonable length).
+    Returns an empty string on invalid input.
+    """
+    if not token_mint:
+        return ""
+
+    token_mint = str(token_mint).strip()
+
+    # if passed a query fragment or url, extract the value
+    if "token_mint=" in token_mint:
+        token_mint = token_mint.split("token_mint=")[-1].split("&")[0]
+
+    token_mint = token_mint.strip("/ \t\n")
+
+    import re
+    # Base58 chars (no 0,O,I,l) and reasonable length for solana pubkeys
+    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{30,60}", token_mint):
+        return ""
+
+    return token_mint
 
 # ========================
 # ENDPOINTS
@@ -88,25 +133,67 @@ async def get_top_holders(token_mint: str = Query(..., description="Solana token
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/earliest-buyer")
-async def get_earliest_buyer(token_mint: str = Query(...)):
+async def get_first_20_buyers(token_mint: str = Query(..., description="Solana token mint address")):
+    token_mint = sanitize_token_mint(token_mint)
+    if not token_mint:
+        raise HTTPException(status_code=400, detail="Invalid or empty token_mint")
+
     try:
-        save_file = DB_FOLDER / f"{token_mint}_earliest_buyer.pkl"
+        save_file = DB_FOLDER / f"{token_mint}_first_20_buyers.pkl"
+
         url = f"https://solana-gateway.moralis.io/token/mainnet/{token_mint}/swaps"
-        headers = {"accept": "application/json", "X-API-Key": MORALIS_API_KEY}
-        params = {"limit": 50, "order": "ASC", "transactionTypes": "buy"}
+        headers = {
+            "accept": "application/json",
+            "X-API-Key": MORALIS_API_KEY
+        }
+        params = {
+            "limit": 50,   # scan enough swaps
+            "order": "ASC"  # earliest first
+        }
+
         data = await async_get_json(url, headers=headers, params=params)
         results = data.get("result", [])
+
         if not results:
-            raise HTTPException(status_code=404, detail=f"No buy transactions found for {token_mint}")
-        earliest_tx = results[0]
-        earliest_buyer = {
-            "walletAddress": earliest_tx.get("walletAddress"),
-            "blockTimestamp": earliest_tx.get("blockTimestamp"),
-            "transactionHash": earliest_tx.get("transactionHash"),
-            "totalValueUsd": earliest_tx.get("totalValueUsd")
+            raise HTTPException(status_code=404, detail="No swap data found")
+
+        seen_wallets = set()
+        buyers = []
+
+        for tx in results:
+            if (tx.get("transactionType") or "").lower() != "buy":
+                continue
+
+            wallet = tx.get("walletAddress")
+            if not wallet or wallet in seen_wallets:
+                continue
+
+            buyers.append({
+                "walletAddress": wallet,
+                "blockTimestamp": tx.get("blockTimestamp"),
+                "transactionHash": tx.get("transactionHash"),
+                "totalValueUsd": tx.get("totalValueUsd"),
+            })
+
+            seen_wallets.add(wallet)
+
+            if len(buyers) == 20:
+                break
+
+        if not buyers:
+            raise HTTPException(status_code=404, detail="No buy transactions found")
+
+        df = pd.DataFrame(buyers)
+        dump(df, save_file)
+
+        return {
+            "token_mint": token_mint,
+            "count": len(buyers),
+            "buyers": buyers
         }
-        dump(earliest_buyer, save_file)
-        return earliest_buyer
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
