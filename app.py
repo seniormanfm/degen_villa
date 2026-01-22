@@ -303,60 +303,20 @@ async def get_daily_flow(token_mint: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
     
 # add this before the wallet-profit endpoint
+
 @app.get("/wallet-portfolio")
-async def wallet_portfolio(
-    wallet_address: str = Query(..., description="Solana wallet address")
-):
+async def wallet_portfolio(wallet_address: str = Query(..., description="Solana wallet address")):
     wallet_address = wallet_address.strip()
     if not wallet_address:
         raise HTTPException(status_code=400, detail="Invalid or empty wallet_address")
 
     url = f"https://solana-gateway.moralis.io/account/mainnet/{wallet_address}/portfolio"
-    headers = {
-        "Accept": "application/json",
-        "X-API-Key": MORALIS_API_KEY
-    }
-    params = {
-        "nftMetadata": "false",
-        "mediaItems": "false",
-        "excludeSpam": "true"
-    }
+    headers = {"Accept": "application/json", "X-API-Key": MORALIS_API_KEY}
+    params = {"nftMetadata": "false", "mediaItems": "false", "excludeSpam": "true"}
 
     try:
         data = await async_get_json(url, headers=headers, params=params)
-
-        tokens = data.get("tokens", [])
-        enriched_tokens = []
-
-        for token in tokens:
-            balance = float(token.get("balance", 0))
-            decimals = int(token.get("decimals", 0))
-            price_usd = float(token.get("priceUsd", 0) or 0)
-
-            normalized_balance = balance / (10 ** decimals) if decimals else balance
-            token_value_usd = normalized_balance * price_usd
-
-            enriched_tokens.append({
-                "mint": token.get("mint"),
-                "symbol": token.get("symbol"),
-                "name": token.get("name"),
-                "balance": normalized_balance,
-                "decimals": decimals,
-                "priceUsd": price_usd,
-                "tokenValueUsd": round(token_value_usd, 6)
-            })
-
-        total_wallet_value_usd = round(
-            sum(t["tokenValueUsd"] for t in enriched_tokens),
-            6
-        )
-
-        return {
-            "wallet": wallet_address,
-            "totalValueUsd": total_wallet_value_usd,
-            "tokens": enriched_tokens
-        }
-
+        return {"wallet": wallet_address, "portfolio": data}
     except HTTPException:
         raise
     except Exception as e:
