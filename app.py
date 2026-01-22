@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 import os
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 from joblib import dump, load
 import json
@@ -40,6 +41,25 @@ logging.basicConfig(
 
 
 app = FastAPI(title="DegenVilla Solana API", version="1.0")
+
+# Configure CORS
+_origins_env = os.getenv("FRONTEND_ORIGINS", "")
+if _origins_env:
+    try:
+        ALLOWED_ORIGINS = [o.strip() for o in _origins_env.split(",") if o.strip()]
+    except Exception:
+        ALLOWED_ORIGINS = ["*"]
+        logging.warning("Failed to parse FRONTEND_ORIGINS, falling back to allow-all")
+else:
+    ALLOWED_ORIGINS = ["*"]  # default allow all for development; set FRONTEND_ORIGINS in production
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ========================
 # ROOT ENDPOINT
